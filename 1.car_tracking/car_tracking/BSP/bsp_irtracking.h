@@ -8,7 +8,8 @@
 #ifndef BSP_IRTRACKING_H_
 #define BSP_IRTRACKING_H_
 
-#include "main.h"
+#include <stdint.h>
+#include "main.h"  /* 确保包含main.h以获取GPIO定义 */
 
 
 #define IN_X1 HAL_GPIO_ReadPin(X1_GPIO_Port,X1_Pin)//读取X1引脚的状态 Read the status of X1 pin

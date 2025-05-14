@@ -9,6 +9,7 @@
 #define BSP_APP_PATH_H_
 
 #include "main.h"
+#include <stdint.h>  /* 添加标准整数类型定义 */
 #include "bsp_buzzer_led.h"
 #include "app_motor.h"
 #include "app_irtracking.h"

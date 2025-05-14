@@ -99,21 +99,27 @@ void APP_Check_Button(void)
         return;
     }
     
-    // 检查按键1 - 任务1
-    if (KEY1_PRESSED()) {
+    // 使用HAL_GPIO_ReadPin直接读取按键状态而不是宏
+    GPIO_PinState key1_state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY1_Pin);
+    GPIO_PinState key2_state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY2_Pin);
+    GPIO_PinState key3_state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY3_Pin);
+    
+    // 检查按键1 - 任务1 (按键为低电平表示按下)
+    if (key1_state == GPIO_PIN_RESET) {
         APP_Set_Mode(MODE_TASK1);
         last_key_time = current_time;
     }
     // 检查按键2 - 任务2
-    else if (KEY2_PRESSED()) {
+    else if (key2_state == GPIO_PIN_RESET) {
         APP_Set_Mode(MODE_TASK2);
         last_key_time = current_time;
     }
     // 检查按键3 - 任务3或4（长按为任务4）
-    else if (KEY3_PRESSED()) {
+    else if (key3_state == GPIO_PIN_RESET) {
         // 简单长按检测
         HAL_Delay(500);
-        if (KEY3_PRESSED()) {
+        key3_state = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY3_Pin);
+        if (key3_state == GPIO_PIN_RESET) {
             // 长按，选择任务4
             APP_Set_Mode(MODE_TASK4);
         } else {
@@ -151,9 +157,17 @@ void APP_Set_Mode(CarMode_t mode)
             break;
         case MODE_TASK1:
             BSP_LED_Set_Color(1, 0, 0, 1, 0, 0);  // 红色
+            // 第一个任务需要延时1秒再开始
+            HAL_Delay(1000);
+            BSP_Notify_Point();  // 延时后发出启动提示
             break;
         case MODE_TASK2:
             BSP_LED_Set_Color(0, 1, 0, 0, 1, 0);  // 绿色
+            // 第二个任务需要延时0.5秒再开始
+            HAL_Delay(500);
+            BSP_Notify_Point();  // 延时后发出启动提示
+            // 立即开始直行
+            Motion_Set_Speed(700, 700, 700, 700);
             break;
         case MODE_TASK3:
             BSP_LED_Set_Color(1, 1, 0, 1, 1, 0);  // 黄色
@@ -163,52 +177,90 @@ void APP_Set_Mode(CarMode_t mode)
             break;
     }
     
-    // 如果不是空闲模式，给出启动提示
-    if (mode != MODE_IDLE) {
+    // 对于除了任务1和任务2以外的任务，在启动时给出提示
+    if (mode != MODE_IDLE && mode != MODE_TASK1 && mode != MODE_TASK2) {
         BSP_Notify_Point();  // 起点提示
     }
 }
 
 /**
- * @brief  任务1处理函数 - A点到B点
+ * @brief  任务1处理函数 - 传感器变化检测
  * @param  无
  * @retval 无
  */
 void APP_Task1_Process(void)
 {
+    static uint8_t prev_sensor_status = 0;
+    static uint8_t init_done = 0;
+    static uint32_t start_time = 0;
+    static uint8_t detection_active = 0;
+    static uint32_t detection_time = 0;
+    
     if (task_completed) {
         return;
     }
     
-    // 根据当前状态执行不同操作
-    switch (current_point) {
-        case POINT_A:
-            // 已经在A点，直接沿直线前进，巡线到B点
-            car_irtrack();
-            break;
-            
-        case POINT_B:
-            // 到达B点，任务完成
+    uint32_t current_time = HAL_GetTick();
+    
+    // 第一次进入，记录初始传感器状态和启动时间
+    if (!init_done) {
+        prev_sensor_status = get_sensor_status();
+        start_time = current_time;
+        init_done = 1;
+        
+        // 开始直行
+        Motion_Set_Speed(700, 700, 700, 700);
+        return;
+    }
+    
+    // 已经检测到变化且处于延时停车阶段
+    if (detection_active) {
+        // 继续直行
+        Motion_Set_Speed(700, 700, 700, 700);
+        
+        // 检查是否已经延时0.5秒
+        if (current_time - detection_time >= 400) {
+            // 延时0.5秒后停车
             Motion_Stop(1);
-            BSP_Notify_Point();  // B点提示
             
-            // 检查时间限制
-            if (HAL_GetTick() - task_start_time <= 15000) {
-                // 在规定时间内完成
-                BSP_LED_Set_Color(0, 1, 0, 0, 1, 0);  // 绿色表示成功
-            } else {
-                // 超时
-                BSP_LED_Set_Color(1, 0, 0, 1, 0, 0);  // 红色表示超时
-            }
+            // 发出声光提示
+            BSP_Notify_Point();
+            
+            // 使用橙色灯光表示完成
+            BSP_LED_Set_Color(1, 1, 0, 1, 1, 0);
             
             task_completed = 1;
-            break;
-            
-        default:
-            // 意外状态，回到A点重新开始
-            current_point = POINT_A;
-            break;
+        }
+        return;
     }
+    
+    // 获取当前传感器状态
+    uint8_t current_status = get_sensor_status();
+    
+    // 在开始行驶后的第一秒内，忽略传感器变化
+    if (current_time - start_time <= 1000) {
+        // 更新传感器状态但不执行停车检测
+        prev_sensor_status = current_status;
+        
+        // 继续直行
+        Motion_Set_Speed(700, 700, 700, 700);
+        return;
+    }
+    
+    // 检测是否有任何传感器从1变为0
+    uint8_t changed_to_zero = (prev_sensor_status & ~current_status);
+    
+    if (changed_to_zero) {
+        // 有传感器从1变为0，记录检测时间并设置检测状态
+        detection_active = 1;
+        detection_time = current_time;
+    }
+    
+    // 更新上一次的传感器状态
+    prev_sensor_status = current_status;
+    
+    // 继续直行
+    Motion_Set_Speed(700, 700, 700, 700);
 }
 
 /**
@@ -222,28 +274,49 @@ void APP_Task2_Process(void)
         return;
     }
     
+    // 获取当前灰度传感器状态
+    uint8_t sensor_status = get_sensor_status();
+    
     // 根据当前状态执行不同操作
     switch (current_point) {
         case POINT_A:
             // 从A点前进到B点
-            car_irtrack();
+            if (sensor_status == 0x0F) {  // 如果四个传感器都是1
+                Motion_Set_Speed(700, 700, 700, 700);  // 直行
+            } else {
+                car_irtrack();  // 使用标准巡线
+            }
             break;
             
         case POINT_B:
             // 在B点，需要沿弧线BC行驶
             current_arc = ARC_BC;
-            APP_Arc_Tracking(current_arc);
+            if (sensor_status == 0x0F) {  // 如果四个传感器都是1
+                // 弧线行驶（左转弧线）
+                car_arc_tracking(0, 60);  // 左转，弯曲半径60%
+            } else {
+                APP_Arc_Tracking(current_arc);
+            }
             break;
             
         case POINT_C:
             // 从C点前进到D点
-            car_irtrack();
+            if (sensor_status == 0x0F) {  // 如果四个传感器都是1
+                Motion_Set_Speed(700, 700, 700, 700);  // 直行
+            } else {
+                car_irtrack();  // 使用标准巡线
+            }
             break;
             
         case POINT_D:
             // 在D点，需要沿弧线DA行驶
             current_arc = ARC_DA;
-            APP_Arc_Tracking(current_arc);
+            if (sensor_status == 0x0F) {  // 如果四个传感器都是1
+                // 弧线行驶（右转弧线）
+                car_arc_tracking(1, 60);  // 右转，弯曲半径60%
+            } else {
+                APP_Arc_Tracking(current_arc);
+            }
             break;
             
         default:
@@ -254,7 +327,7 @@ void APP_Task2_Process(void)
     }
     
     // 检查是否完成任务
-    if (current_point == POINT_A && current_arc == ARC_NONE) {
+    if (current_point == POINT_A && current_arc == ARC_NONE && task_start_time > 0) {
         // 回到A点且不在弧线上，表示完成一圈
         Motion_Stop(1);
         BSP_Notify_Point();  // A点提示
@@ -423,27 +496,33 @@ void APP_Task4_Process(void)
  */
 void APP_Check_Points(void)
 {
-    // 注：这是一个简化的实现，实际需要根据场地情况和传感器状态来判断
-    // 在真实情况下，可能需要特定的标记或多个传感器的组合状态来判断
+    static uint32_t last_point_time = 0;
+    uint32_t current_time = HAL_GetTick();
+    
+    // 防止短时间内重复检测关键点（至少间隔1秒）
+    if (current_time - last_point_time < 1000) {
+        return;
+    }
+    
+    // 获取当前传感器状态
+    uint8_t status = get_sensor_status();
     
     // 检测特定传感器组合状态来判断路口
-    // 例如，所有传感器都在线上可能表示到达路口
-    if (IN_X1 == 1 && IN_X2 == 1 && IN_X3 == 1 && IN_X4 == 1) {
+    // 所有传感器都在线上可能表示到达路口
+    if (status == 0x0F) {  // 0x0F = 1111，表示所有传感器都检测到黑线
         // 根据当前位置和行驶方向判断可能到达的点
         
-        // 任务1：判断B点
-        if (current_mode == MODE_TASK1 && current_point == POINT_A) {
-            current_point = POINT_B;
-            BSP_Notify_Point();  // 到达B点提示
-        }
+        // 任务1：不做特殊处理，由APP_Task1_Process负责监控传感器变化
         
         // 任务2：判断B点和D点
-        else if (current_mode == MODE_TASK2) {
+        if (current_mode == MODE_TASK2) {
             if (current_point == POINT_A) {
                 current_point = POINT_B;
+                last_point_time = current_time;
                 BSP_Notify_Point();  // 到达B点提示
             } else if (current_point == POINT_C) {
                 current_point = POINT_D;
+                last_point_time = current_time;
                 BSP_Notify_Point();  // 到达D点提示
             }
         }
@@ -452,9 +531,11 @@ void APP_Check_Points(void)
         else if (current_mode == MODE_TASK3 || current_mode == MODE_TASK4) {
             if (current_point == POINT_A && current_arc == ARC_NONE) {
                 current_point = POINT_C;
+                last_point_time = current_time;
                 BSP_Notify_Point();  // 到达C点提示
             } else if (current_point == POINT_B) {
                 current_point = POINT_D;
+                last_point_time = current_time;
                 BSP_Notify_Point();  // 到达D点提示
             }
         }
@@ -462,31 +543,37 @@ void APP_Check_Points(void)
     
     // 检测弧线完成的情况
     if (current_arc != ARC_NONE) {
-        // 通过特定的传感器状态判断弧线完成
-        // 例如，如果经过一段弧线后，中间传感器又回到线上
-        if (IN_X2 == 1 && IN_X3 == 1) {
+        // 判断弧线完成的条件，使用过渡区域传感器状态
+        // 由于弧线结束时的传感器状态可能多种多样，我们检测特定的组合
+        if ((status == 0x06 || status == 0x07 || status == 0x0E || status == 0x0F) && 
+            (current_time - last_point_time > 2000)) {  // 要求从开始弧线行驶后至少经过2秒
+            
             switch (current_arc) {
                 case ARC_BC:
                     current_point = POINT_C;
                     current_arc = ARC_NONE;
+                    last_point_time = current_time;
                     BSP_Notify_Point();  // 到达C点提示
                     break;
                     
                 case ARC_DA:
                     current_point = POINT_A;
                     current_arc = ARC_NONE;
+                    last_point_time = current_time;
                     // A点提示在完成任务时处理
                     break;
                     
                 case ARC_CB:
                     current_point = POINT_B;
                     current_arc = ARC_NONE;
+                    last_point_time = current_time;
                     BSP_Notify_Point();  // 到达B点提示
                     break;
                     
                 case ARC_AD:
                     current_point = POINT_D;
                     current_arc = ARC_NONE;
+                    last_point_time = current_time;
                     BSP_Notify_Point();  // 到达D点提示
                     break;
                     

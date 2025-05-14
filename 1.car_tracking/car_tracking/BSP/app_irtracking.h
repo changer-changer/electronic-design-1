@@ -8,6 +8,7 @@
 #ifndef APP_IRTRACKING_H_
 #define APP_IRTRACKING_H_
 
+#include <stdint.h>  /* 添加标准整数类型定义 */
 #include "bsp_irtracking.h"
 #include "app_motor.h"
 

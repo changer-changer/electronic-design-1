@@ -8,6 +8,7 @@
 #ifndef BSP_BUZZER_LED_H_
 #define BSP_BUZZER_LED_H_
 
+#include <stdint.h>  /* 添加标准整数类型定义 */
 #include "main.h"
 
 /* 蜂鸣器控制宏 */
